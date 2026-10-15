@@ -73,6 +73,14 @@ class CodeAgent(Agent):
         )
         # TODO(1.4): If any skills are available to the agent, make their
         # descriptions/metadata available to the agent in the prompt.
+        if self.skills:
+            catalog = "\n".join(skill["metadata"] for skill in self.skills.values())
+            self.system_prompt += (
+                "\n\nReusable skills are available. Call `invoke_skill` with a "
+                "skill's name to load its instructions, and follow them in place "
+                "of your default approach.\n\n<skills>\n"
+                f"{catalog}\n</skills>\n"
+            )
 
     def execute_tool_calls(
         self, tool_calls: list[dict[str, Any]]
@@ -133,6 +141,15 @@ class CodeAgent(Agent):
                             else:
                                 self.finished = True
                                 content = summary
+                        
+                        elif name == "invoke_skill":
+                            skill_name = arguments.get("name")
+                            if not isinstance(skill_name, str):
+                                content = "Error: invoke_skill requires a string name."
+                            elif skill_name not in self.skills:
+                                content = f"Error: unknown skill {skill_name!r}."
+                            else:
+                                content = self.skills[skill_name]["content"]
                         else:
                             content = f"Error: unknown tool {name!r}."
         
