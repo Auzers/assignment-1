@@ -107,6 +107,8 @@ class ChessAgent(Agent):
         )
 
         # TODO(Part 3): Register the play_move tool schema from tools.py.
+        self.tools.append(PLAY_MOVE_TOOL)
+        self.tools.append(SIMULATE_MOVE_TOOL)
 
         if programmatic_tools:
             self.tools.append(RUN_PYTHON_TOOL)
@@ -177,4 +179,133 @@ class ChessAgent(Agent):
 
         # TODO(Part 3.3-4): add cases for simulate_move and run_python, with
         # linked observations and recoverable errors, just like the old tool.
-        raise NotImplementedError
+        observations: list[dict[str, str]] = []
+        play_move_seen = False
+
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                content = (
+                    "<chess_error>Malformed tool call: expected an object."
+                    "</chess_error>"
+                )
+            else:
+                call_id = str(tool_call.get("id",""))
+                function = tool_call.get("function")  # run 中已经保证了一定有
+
+                if not isinstance(function, dict):
+                    content = (
+                        "<chess_error>Malformed tool call: function must be "
+                        "an object.</chess_error>"
+                    )
+                
+                else:
+                    name = function.get("name")
+                    arguments = function.get("arguments")
+
+                    if not isinstance(name, str):
+                        content = (
+                            "<chess_error>Malformed tool call: function name "
+                            "must be a string.</chess_error>"
+                        )
+                    elif name == "simulate_move" and SIMULATE_MOVE_TOOL in self.tools:
+                        if not isinstance(arguments, str):
+                            content = (
+                                "<chess_error>Malformed tool call: arguments "
+                                "must be a JSON string.</chess_error>"
+                            )
+                        else:
+                            content = _simulate_move(self.chess_client, arguments)
+                    elif name == "run_python" and RUN_PYTHON_TOOL in self.tools:
+                        if not isinstance(arguments, str):
+                            content = (
+                                "<chess_error>Malformed tool call: arguments "
+                                "must be a JSON string.</chess_error>"
+                            )
+                        else:
+                            runner_result = _run_python(
+                                self.env,
+                                self.python_sandbox_port,
+                                arguments,
+                            )
+
+                            try:
+                                live_state = _game_state(self.chess_client)
+                                formatted_state = self.format_state(live_state)
+                            except (
+                                ValueError,
+                                RuntimeError,
+                                TypeError,
+                                httpx.HTTPError,
+                            ) as exc:
+                                content = (
+                                    f"{runner_result}\n"
+                                    "<chess_error>Could not refresh the live "
+                                    f"game state: {exc}</chess_error>"
+                                )
+                            else:
+                                self.last_state = live_state
+                                self.finished = bool(live_state.get("game_over"))
+                                content = f"{runner_result}\n{formatted_state}"
+                    elif name == "invoke_skill" and INVOKE_SKILL_TOOL in self.tools:
+                        if not isinstance(arguments, str):
+                            content = (
+                                "<chess_error>Malformed tool call: arguments "
+                                "must be a JSON string.</chess_error>"
+                            )
+                        else:
+                            content = _invoke_skill(self.skills, arguments)            
+                    elif name != "play_move" or PLAY_MOVE_TOOL not in self.tools:
+                        content = (
+                            f"<chess_error>Unknown or unregistered tool: "
+                            f"{name!r}.</chess_error>"
+                        )
+                    elif play_move_seen:
+                        content = (
+                            "<chess_error>Only one play_move call may be "
+                            "executed per turn.</chess_error>"
+                        )
+                    else:
+                        play_move_seen = True
+
+                        if not isinstance(arguments, str):
+                            content = (
+                                "<chess_error>Malformed tool call: arguments "
+                                "must be a JSON string.</chess_error>"
+                            )
+                        
+                        else:
+                            result = _play_move(self.chess_client, arguments)
+
+                            if result.startswith("<chess_error>"):
+                                content = result
+                            else:
+                                try:
+                                    state = json.loads(result)
+                                    if not isinstance(state, dict):
+                                        raise ValueError(
+                                            "Chess tool returned a non-object state."
+                                        )
+
+                                    content = self.format_state(state)
+                                    self.last_state = state
+                                    self.finished = bool(state.get("game_over"))
+                                except (
+                                    json.JSONDecodeError,
+                                    TypeError,
+                                    ValueError,
+                                ) as exc:
+                                    content = f"<chess_error>{exc}</chess_error>"
+
+            observations.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": content,
+                }
+            )
+
+        return observations
+
+
+
+

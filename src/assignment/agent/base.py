@@ -3,9 +3,8 @@
 Part 1 completes the generic loop here; the two subclasses in this package
 supply only their own tools and tool executors.
 """
-
 from __future__ import annotations
-
+import yaml
 from copy import deepcopy
 import json
 import logging
@@ -30,7 +29,13 @@ MAX_OBSERVATION_CHARS = 10_000
 # TODO(Part 2): Write instructions that make the model produce concise working
 # memory for a software agent. The prompt should preserve concrete progress,
 # failures, test results, constraints, and next steps without copying raw output.
-COMPACTION_SYSTEM_PROMPT = ""
+COMPACTION_SYSTEM_PROMPT = (
+    "Create concise factual working memory for a software agent. Summarize "
+    "only the supplied old history. Preserve the objective, constraints, files, "
+    "commands, edits, concrete results, failed approaches, test results, "
+    "blockers, and next action. Do not copy raw tool output unless an exact "
+    "detail is necessary. Do not invent facts."
+)
 
 
 class StepLimitError(Exception):
@@ -165,7 +170,57 @@ class Agent:
         # ``content`` of the skill file for ``invoke_skill``. Reject duplicate
         # names and malformed or missing frontmatter with a clear
         # ``ValueError``.
-        raise NotImplementedError
+        if not skills_path.is_dir():
+            raise ValueError(
+                f"skills_path must be an existing directory: {skills_path}"
+            )
+        skills = {}
+        
+        for skill_directory in sorted(skills_path.iterdir()):
+            if not skill_directory.is_dir():
+                continue
+            
+            skill_file = skill_directory / "SKILL.md"
+            if not skill_file.is_file():
+                raise ValueError(f"Missing SKILL.md in {skill_directory}")
+
+            content = skill_file.read_text(encoding="utf-8")
+            lines = content.splitlines()
+
+            if len(lines) < 3 or lines[0] != "---":
+                raise ValueError(f"Missing frontmatter in {skill_file}")
+            
+            try:
+                frontmatter_end = lines.index("---", 1) # 从 下标为 1 开始寻找 “---” 的索引
+            except ValueError as exc:
+                raise ValueError(f"Malformed frontmatter in {skill_file}") from exc
+
+            try:
+                frontmatter = yaml.safe_load(
+                    "\n".join(lines[1:frontmatter_end])
+                ) # yaml.safe_load 把 文本转换成 python 字典
+            except yaml.YAMLError as exc:
+                raise ValueError(f"Malformed frontmatter in {skill_file}") from exc
+
+            if not isinstance(frontmatter, dict):
+                raise ValueError(f"Malformed frontmatter in {skill_file}")
+            
+            name = frontmatter.get("name")
+            description = frontmatter.get("description")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"Skill in {skill_file} needs a non-empty name")
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError(f"Skill in {skill_file} needs a non-empty description")
+            if name in skills:
+                raise ValueError(f"Duplicate skill name: {name}")
+
+            skills[name] = {
+                "metadata": f"name: {name}\ndescription: {description}",
+                "content": content,
+            }
+
+        return skills
+            
 
     def query_language_model(self) -> dict[str, Any]:
         """Send one tool-enabled Chat Completions request and normalize it."""
@@ -271,9 +326,30 @@ class Agent:
         # with all linked tool observations. The resulting summary should change
         # what `build_prompt` emits, and reduce the length of the prompt.
 
-        raise NotImplementedError
+        
+        assistant_indices = [
+            index for index, message in enumerate(self.interaction_history)
+            if message.get("role") == "assistant"
+        ]
 
-        compaction_prompt = []
+        first_recent_index = assistant_indices[
+            -self.compaction_keep_recent_steps
+        ]
+
+        old_history = deepcopy(
+            self.interaction_history[:first_recent_index]
+        )
+
+        recent_history = self.interaction_history[first_recent_index:]
+
+        
+
+        compaction_prompt = [
+            {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.task_prompt},
+            *old_history,
+        ]
 
         ### Do not modify this section ###
         compaction_response = self.client.chat.completions.create(
@@ -286,6 +362,14 @@ class Agent:
 
         # Use `compaction_response` to update what `build_prompt` emits, but
         # DO NOT modify the object itself. Let the method return it unchanged.
+        summary = compaction_response.choices[0].message.content
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("Compaction response did not contain text.")
+
+        self.interaction_history = [
+            {"role": "assistant", "content": summary},
+            *recent_history,
+        ]
 
         ### Do not modify this section ###
         return compaction_prompt, compaction_response.model_dump(mode="json")
@@ -341,7 +425,7 @@ class Agent:
                     raise StepLimitError(
                         f"Agent exceeded its step limit of {self.step_limit}"
                     )
-                # self.maybe_compact_context()
+                self.maybe_compact_context()
 
                 action = self.query_language_model()
                 self.interaction_history.append(action)

@@ -52,7 +52,29 @@ def _simulate_move(client: httpx.Client, arguments: str) -> str:
     # JSON arguments, arguments that are not an object, a missing or
     # non-string fen, a non-string move, a position or move the server rejects,
     # and a transport failure.
-    raise NotImplementedError
+    try:
+        parsed_arguments = json.loads(arguments)
+        if not isinstance(parsed_arguments, dict):
+            raise ValueError("Tool arguments must be a JSON object.")
+
+        fen = parsed_arguments.get("fen")
+        if not isinstance(fen, str):
+            raise ValueError("fen must be a string.")
+
+        move = parsed_arguments.get("move")
+        if move is not None and not isinstance(move, str):
+            raise ValueError("move must be a string or null.")
+
+        state = _request_state(
+            client,
+            "POST",
+            "/api/simulate",
+            json={"fen": fen, "move": move},
+        )
+        return json.dumps(state)
+    except (ValueError, RuntimeError, TypeError, httpx.HTTPError) as exc:
+        return f"<chess_error>{exc}</chess_error>"
+    
 
 
 def _play_move(client: httpx.Client, arguments: str) -> str:
@@ -67,7 +89,28 @@ def _play_move(client: httpx.Client, arguments: str) -> str:
     # for the agent to address. Cover malformed JSON arguments, arguments
     # that are not an object, a missing or non-string fen, a non-string move,
     # a position or move the server rejects, and a transport failure.
-    raise NotImplementedError
+    try:
+        parsed_arguments = json.loads(arguments)
+        if not isinstance(parsed_arguments, dict):
+            raise ValueError("Tool arguments must be a JSON object.")
+        
+        move = parsed_arguments.get("move")
+        if not isinstance(move, str):
+            raise ValueError("move must be a string.")
+        
+        state = _request_state(
+            client,
+            "POST",
+            "/api/move",
+            json={"move": move},
+        )
+        return json.dumps(state) # 把服务器返回的 python 字典重新变成 json 字符串，作为给模型的工具观察结果
+
+    except (ValueError, RuntimeError, TypeError, httpx.HTTPError) as exc:
+        return f"<chess_error>{exc}</chess_error>"
+
+
+
 
 
 def _run_python(env: Any, port: int, arguments: str) -> str:
@@ -95,7 +138,43 @@ def _run_python(env: Any, port: int, arguments: str) -> str:
     #
     # Return <chess_error>{message}</chess_error> if there are issues like type
     # mismatches or parsing failures.
-    raise NotImplementedError
+    try:
+        parsed_arguments = json.loads(arguments)
+        if not isinstance(parsed_arguments, dict):
+            raise ValueError("Tool arguments must be a JSON object.")
+
+        code = parsed_arguments.get("code")
+        if not isinstance(code, str):
+            raise ValueError("code must be a string.")
+
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError("port must be an integer between 1 and 65535.")
+
+        encoded_code = base64.b64encode(code.encode("utf-8")).decode("ascii")
+        command = (
+            f"python /opt/assignment/sandbox_python.py {port} {encoded_code}"
+        )
+        result = env.execute(command)
+
+        if not isinstance(result, dict):
+            raise RuntimeError("Sandbox execution returned an invalid result.")
+
+        if result.get("returncode") != 0:
+            message = (
+                result.get("exception_info")
+                or result.get("stderr")
+                or result.get("output")
+                or f"Sandbox runner exited with code {result.get('returncode')}."
+            )
+            raise RuntimeError(str(message))
+
+        stdout = result.get("stdout", result.get("output"))
+        if not isinstance(stdout, str):
+            raise RuntimeError("Sandbox runner did not return stdout text.")
+        return stdout
+
+    except (TypeError, ValueError, RuntimeError) as exc:
+        return f"<chess_error>{exc}</chess_error>"
 
 
 def _invoke_skill(skills: dict[str, dict[str, str]], arguments: str) -> str:
@@ -103,7 +182,20 @@ def _invoke_skill(skills: dict[str, dict[str, str]], arguments: str) -> str:
     # TODO(3.5): parse the arguments and return the named skill's content.
     # Return <chess_error>{message}</chess_error> if there are issues like type
     # mismatches or parsing failures.
-    raise NotImplementedError
+    try:
+        parsed_arguments = json.loads(arguments)
+        if not isinstance(parsed_arguments, dict):
+            raise ValueError("Tool arguments must be a JSON object.")
+
+        name = parsed_arguments.get("name")
+        if not isinstance(name, str):
+            raise ValueError("name must be a string.")
+        if name not in skills:
+            raise ValueError(f"Unknown skill: {name!r}")
+
+        return skills[name]["content"]
+    except (TypeError, ValueError) as exc:
+        return f"<chess_error>{exc}</chess_error>"
 
 
 def _game_state(client: httpx.Client, reset: bool = False) -> dict:

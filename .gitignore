@@ -9,4 +9,5 @@ __pycache__/
 data/*
 !data/README.md
 !data/.gitkeep
+artifacts/part3-trajectory.json
 .env
